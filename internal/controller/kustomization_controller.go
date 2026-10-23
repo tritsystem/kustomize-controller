@@ -252,6 +252,14 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Check dependencies and requeue the reconciliation if the check fails.
 	if len(obj.Spec.DependsOn) > 0 {
 		if err := r.checkDependencies(ctx, obj, artifactSource); err != nil {
+			if acl.IsAccessDenied(err) {
+				conditions.MarkFalse(obj, meta.ReadyCondition, apiacl.AccessDeniedReason, "%s", err)
+				conditions.MarkStalled(obj, apiacl.AccessDeniedReason, "%s", err)
+				obj.Status.ObservedGeneration = obj.Generation
+				r.event(obj, artifactSource, revision, originRevision, eventv1.EventSeverityError, kustomizev1.ActionCheckDependencies, err.Error(), nil)
+				return ctrl.Result{}, reconcile.TerminalError(err)
+			}
+
 			// Check if this is a terminal error that should not trigger retries
 			if errors.Is(err, reconcile.TerminalError(nil)) {
 				errMsg := fmt.Sprintf("%s: %v", TerminalErrorMessage, err)
@@ -595,6 +603,13 @@ func (r *KustomizationReconciler) checkDependencies(ctx context.Context,
 		if depRef.Namespace == "" {
 			depRef.Namespace = obj.GetNamespace()
 		}
+
+		if r.NoCrossNamespaceRefs && depRef.Namespace != obj.GetNamespace() {
+			return acl.AccessDeniedError(
+				fmt.Sprintf("can't access '%s/%s', cross-namespace references have been blocked",
+					kustomizev1.KustomizationKind, types.NamespacedName{Namespace: depRef.Namespace, Name: depRef.Name}))
+		}
+
 		depName := types.NamespacedName{
 			Namespace: depRef.Namespace,
 			Name:      depRef.Name,
